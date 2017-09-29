@@ -1,0 +1,295 @@
+$ sudo apt-get update
+$ sudo apt-get upgrade
+
+
+$ sudo apt-get install python-virtualenv
+
+$ virtualenv --no-site-packages <Envoirement Name>
+
+* Activate envoirment
+$ source ./bin/activate
+(django_env)
+
+
+* Our project is running on Server's public IP with port 8000 or ...
+(django_env) $ python manage.py 
+
+
+* Now we will setup our app server that is Gunicorn rather than using Django's by default single threaded development server.
+(django_env) $ pip install gunicorn
+Downloading/unpacking gunicorn
+  Downloading gunicorn-0.17.4.tar.gz (372Kb): 372Kb downloaded
+  Running setup.py egg_info for package gunicorn
+Installing collected packages: gunicorn
+  Running setup.py install for gunicorn
+    Installing gunicorn_paster script to /webapps/hello_django/bin
+    Installing gunicorn script to /webapps/hello_django/bin
+Successfully installed gunicorn
+    Installing gunicorn_django script to /webapps/hello_django/bin
+Cleaning up...
+
+
+* gunicorn working, test it by running
+(django_env) $ gunicorn sample_project.wsgi:application --bind 0.0.0.0:8001
+
+
+* make a bash script called gunicorn.bash. on cd home/ubuntu
+(django_env) $ sudo nano gunicorn_start.bash
+
+#============================================================================================================================================
+* now add following configurations into file
+
+#!/bin/bash
+
+NAME="app"                                   					  # Name of the application
+DJANGODIR=/home/ubuntu/myproject/intelpol                                         # Django project directory
+SOCKFILE=/home/ubuntu/server/run/gunicorn.sock                                    # we will communicte using this unix socket
+USER=ubuntu                                                                       # the user to run as
+GROUP=ubuntu                                                                      # the group to run as
+NUM_WORKERS=3                                                                     # how many worker processes should Gunicorn spawn
+DJANGO_SETTINGS_MODULE=django_project.settings  				  #<Path of Folder which contains settings.py> which settings file should Django use
+DJANGO_WSGI_MODULE=django_project.wsgi                                            #<Path of Folder which contains wsgi.py>  WSGI module name
+echo "Starting $NAME as `whoami`"
+
+# Activate the virtual environment
+
+cd $DJANGODIR
+source /home/ubuntu/server/bin/activate
+export DJANGO_SETTINGS_MODULE=$DJANGO_SETTINGS_MODULE
+export PYTHONPATH=$DJANGODIR:$PYTHONPATH
+
+# Create the run directory if it doesn't exist
+
+RUNDIR=$(dirname $SOCKFILE)
+test -d $RUNDIR || mkdir -p $RUNDIR
+
+# Start your Django Unicorn
+# Programs meant to be run under supervisor should not daemonize themselves (do not use --daemon)
+
+exec gunicorn ${DJANGO_WSGI_MODULE}:application \
+  --name $NAME \
+  --workers $NUM_WORKERS \
+  --user=$USER --group=$GROUP \
+  --bind=unix:$SOCKFILE \
+  --log-level=debug \
+  --log-file=-
+
+#=================================================================================================================================================
+
+* Now make this script executable.
+$ sudo chmod u+x gunicorn_start.bash
+
+* Lets test this script by running it.
+(django_env) $ ./gunicorn_start.bash
+
+Starting hello_app as hello
+2013-06-09 14:21:45 [10724] [INFO] Starting gunicorn 18.0
+2013-06-09 14:21:45 [10724] [DEBUG] Arbiter booted
+2013-06-09 14:21:45 [10724] [INFO] Listening at: unix:/webapps/hello_django/run/gunicorn.sock (10724)
+2013-06-09 14:21:45 [10724] [INFO] Using worker: sync
+2013-06-09 14:21:45 [10735] [INFO] Booting worker with pid: 10735
+2013-06-09 14:21:45 [10736] [INFO] Booting worker with pid: 10736
+2013-06-09 14:21:45 [10737] [INFO] Booting worker with pid: 10737
+^C (CONTROL-C to kill Gunicorn)
+
+2013-06-09 14:21:48 [10736] [INFO] Worker exiting (pid: 10736)
+2013-06-09 14:21:48 [10735] [INFO] Worker exiting (pid: 10735)
+2013-06-09 14:21:48 [10724] [INFO] Handling signal: int
+2013-06-09 14:21:48 [10737] [INFO] Worker exiting (pid: 10737)
+2013-06-09 14:21:48 [10724] [INFO] Shutting down: Master
+$ exit
+
+#=================================================================================================================================================
+
+* Now, its time to setup supervisor so that it can supervise our application. If system reboots or application quits unexpectedly, supervisor will take care of its restart. For this, 	   first install it.
+
+$ sudo apt-get install supervisor
+
+
+To supervise any program through supervisor, you need to create configuration file for that program inside /etc/supervisor/conf.d/ directory. For our Django application that is intelpol, we will create intelpol.conf
+
+#=================================================================================================================================================
+$ sudo nano /etc/supervisor/conf.d/intelpol.conf
+
+[program:django_project]				     # / intelpol	
+command = /home/ubuntu/gunicorn_start.bash                   ; Command to start app
+user = ubuntu                                                ; User to run as
+stdout_logfile = /home/ubuntu/logs/gunicorn_supervisor.log   ; Where to write log messages
+redirect_stderr = true                                       ; Save stderr in the same log
+environment=LANG=en_US.UTF-8,LC_ALL=en_US.UTF-8              ; Set UTF-8 as default encoding
+
+#=================================================================================================================================================
+
+(django_env) $ mkdir -p /home/ubuntu/logs/
+(django_env) $ touch /home/ubuntu/logs/gunicorn_supervisor.log
+
+After this done, we will ask supervisor to reread configuration files and update it so the our newly configuration file get add.
+
+* For Ubuntu 16.04:
+
+$ sudo systemctl restart supervisor
+$ sudo systemctl enable supervisor
+
+
+* To check status:
+
+$ sudo supervisorctl status intelpol or django_project
+sample_project                   RUNNING  pid 24768, uptime 0:00:10
+
+
+* To stop:
+
+$ sudo supervisorctl stop intelpol or django_project
+sample_project: stopped
+
+* To restart:
+
+$ sudo supervisorctl restart intelpol or django_project
+sample_project: stopped
+sample_project: started
+
+Now, our application will get automatically restart after system gets boot up or our application gets crashed.
+
+#=================================================================================================================================================
+
+* Now, we need to setup last thing that is Nginx. So lets get start. Nginx will act as a server for our application. So first install it.
+
+$ sudo apt-get install nginx
+
+$ sudo nano /etc/nginx/sites-available/intelpol.conf
+
+* open ports HTTP :80, SSH :22,
+#=========================================================================
+upstream django_project {
+  # fail_timeout=0 means we always retry an upstream even if it failed
+  # to return a good HTTP response (in case the Unicorn master nukes a
+  # single worker for timing out).
+  server unix:/home/ubuntu/server/run/gunicorn.sock fail_timeout=0;
+}
+
+server {
+
+    listen  0.0.0.0:80;
+    server_name  intelpol.ai; # <public port or domain Name in our case intelpol.ai>   
+
+    client_max_body_size 4G;
+    access_log /home/ubuntu/logs/nginx-access.log;
+    error_log /home/ubuntu/logs/nginx-error.log;
+
+    location /static/ {
+        alias   /home/ubuntu/myproject/intelpol/app/static/;
+    }
+
+    location /media/ {
+        alias   /home/ubuntu/myproject/intelpol/app/media/;
+    }
+
+    location / {
+
+        # an HTTP header important enough to have its own Wikipedia entry:
+        #   http://en.wikipedia.org/wiki/X-Forwarded-For
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+
+        # enable this if and only if you use HTTPS, this helps Rack
+        # set the proper protocol for doing redirects:
+        # proxy_set_header X-Forwarded-Proto https;
+
+        # pass the Host: header from the client right along so redirects
+        # can be set properly within the Rack application
+        proxy_set_header Host $http_host;
+
+        # we don't want nginx trying to do something clever with
+        # redirects, we set the Host: header above already.
+        proxy_redirect off;
+
+        # set "proxy_buffering off" *only* for Rainbows! when doing
+        # Comet/long-poll stuff.  It's also safe to set if you're
+        # using only serving fast clients with Unicorn + nginx.
+        # Otherwise you _want_ nginx to buffer responses to slow
+        # clients, really.
+        # proxy_buffering off;
+
+        # Try to serve static files from nginx, no point in making an
+        # *application* server like Unicorn/Rainbows! serve static files.
+	if (!-f $request_filename) 
+	{
+            proxy_pass http://django_project;
+            break;
+        }
+    }
+
+    # Error pages
+    error_page 500 502 503 504 /500.html;
+    location = /500.html {
+        root /home/ubuntu/myproject/intelpol/app/static/;
+    }
+}
+
+#====================================================================================
+
+$ sudo ln -s /etc/nginx/sites-available/intelpol.conf /etc/nginx/sites-enabled/intelpol.conf
+
+* Now, start the Nginx.
+
+$ sudo service nginx start
+
+
+
+
+
+FOR More Information GO-TO
+
+https://jee-appy.blogspot.in/2017/01/deply-django-with-nginx.html
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
